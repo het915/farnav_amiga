@@ -1,0 +1,85 @@
+graph TB
+    subgraph CONFIG["row_data.yaml"]
+        ROWS["Row definitions: A, waypoints, B as lat/lon"]
+        PARAMS["utm_epsg | spline_resolution | publish_rate_hz | path_frame_id"]
+    end
+
+    subgraph GLOBAL_PLANNER["GlobalPlanner Node"]
+
+        subgraph INIT["Startup"]
+            PARSE["_parse_rows: load row configs"]
+            TRANSFORMER["pyproj Transformer: WGS84 EPSG:4326 to UTM EPSG:32616"]
+            BUILD["_build_path: generate spline for active row"]
+            PARSE --> BUILD
+            TRANSFORMER --> BUILD
+        end
+
+        subgraph SPLINE["_build_path Pipeline"]
+            COLLECT["Collect points: A + waypoints + B"]
+            CONVERT["_latlon_to_utm: lat/lon to easting/northing"]
+            CHORD["Compute cumulative chord lengths"]
+            NORMALIZE["Normalize parameter t to 0..1"]
+            CUBIC["CubicSpline fit: cs_x and cs_y clamped"]
+            SAMPLE["Sample spline at N uniform points"]
+            ARC["Compute arc-length theta for each sample"]
+            COLLECT --> CONVERT --> CHORD --> NORMALIZE --> CUBIC --> SAMPLE --> ARC
+        end
+
+        subgraph TIMER["Timer callback at publish_rate_hz"]
+            PUB_PATH["_publish_path"]
+            PUB_INFO["_publish_info"]
+            PUB_MARKER["_publish_marker"]
+        end
+
+        subgraph SERVICE["Service: /farnav/set_active_row"]
+            TRIGGER["Trigger: cycles to next row"]
+            REBUILD["Calls _build_path with new row index"]
+            TRIGGER --> REBUILD
+        end
+
+    end
+
+    CONFIG --> PARSE
+
+    subgraph TOPICS["Published ROS2 Topics"]
+        T_PATH["Path: /farnav/global_path"]
+        T_INFO["String JSON: /farnav/path_info"]
+        T_MARKER["Marker LINE_STRIP: /farnav/active_row_marker"]
+    end
+
+    ARC --> PUB_PATH
+    ARC --> PUB_INFO
+    ARC --> PUB_MARKER
+
+    PUB_PATH --> T_PATH
+    PUB_INFO --> T_INFO
+    PUB_MARKER --> T_MARKER
+
+    REBUILD --> BUILD
+
+    subgraph PATH_DETAIL["Path Message Detail"]
+        PD1["pose.position.x = UTM easting"]
+        PD2["pose.position.y = UTM northing"]
+        PD3["pose.position.z = arc-length theta"]
+        PD4["pose.orientation.w = 1.0"]
+    end
+
+    T_PATH --> PATH_DETAIL
+
+    subgraph INFO_DETAIL["Path Info JSON"]
+        ID1["active_row index"]
+        ID2["row_name"]
+        ID3["total_arc_length_m"]
+        ID4["num_spline_points"]
+        ID5["utm_epsg"]
+    end
+
+    T_INFO --> INFO_DETAIL
+
+    subgraph DOWNSTREAM["Consumed By"]
+        MPCC["MPCC Controller"]
+        RVIZ["RViz2 via marker"]
+    end
+
+    T_PATH --> MPCC
+    T_MARKER --> RVIZ

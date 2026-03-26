@@ -1,0 +1,17 @@
+# This file contains the configuration for row data used in the global planner node.
+# Each row consists of a name and a list of GPS points (latitude, longitude) that define the path for navigation.
+# active row mtlb j0 row chalu rakhni ho uska index dena hai 0 se start hoga
+/**:
+  ros__parameters:
+    utm_epsg: "EPSG:32616"
+    spline_resolution: 500
+    publish_rate_hz: 1.0
+    path_frame_id: "odom"
+    rows:
+      row_1:
+        name: "Row 1"
+        A:          [40.0927912, -88.2359884]
+        waypoints:
+          - [40.0928547, -88.2359065]
+        B:          [40.0927806, -88.2357563]
+    active_row: 0

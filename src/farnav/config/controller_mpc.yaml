@@ -1,0 +1,30 @@
+# MPC Controller parameters for FarNav crop-row following
+controller_mpc:
+  ros__parameters:
+    # --- Horizon ---
+    N: 20                       # prediction steps
+    dt: 0.1                     # prediction time step (s) -> 2s lookahead
+
+    # --- Cost weights ---
+    w_cte: 10.0                 # cross-track error
+    w_head: 5.0                 # heading error
+    w_v: 1.0                    # velocity tracking (v - v_ref)
+    w_dv: 2.0                   # control smoothness: delta v_cmd
+    w_dw: 5.0                   # control smoothness: delta omega_cmd
+
+    # --- Constraints ---
+    v_wheel_max: 1.5            # max individual wheel speed (m/s)
+    omega_max: 1.0              # max angular velocity (rad/s)
+    delta_omega_max: 0.5        # max angular velocity change per step (rad/s)
+    row_half_width: 0.45        # lateral constraint (m)
+
+    # --- Vehicle parameters ---
+    track_half_width: 0.435     # half track width b (m), Amiga ~0.87m track
+    tau_v: 0.3                  # velocity first-order lag time constant (s)
+
+    # --- Reference ---
+    v_ref: 0.5                  # desired cruise speed (m/s)
+
+    # --- Node settings ---
+    control_rate_hz: 20.0       # control loop frequency (Hz)
+    path_frame_id: "odom"        # coordinate frame for path

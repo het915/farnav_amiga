@@ -1,0 +1,31 @@
+amiga_bridge:
+  ros__parameters:
+    # Amiga robot connection settings
+    host: "localhost"          # Robot IP or hostname (e.g., 192.168.1.98)
+    canbus_port: 6001          # Canbus service port
+    oak_port: 50010            # OAK camera service port
+    gps_port: 50010            # GPS service port (shared with OAK)
+    filter_port: 20001         # Filter/state estimation service port
+
+    # Service names (as registered on the Amiga brain)
+    oak_service_name: "oak/0"
+    gps_service_name: "gps"
+    filter_service_name: "filter"
+
+    # Stream enable/disable
+    enable_canbus: true
+    enable_oak: true
+    enable_gps: true
+    enable_filter: true
+
+    # Publish rates (every_n: publish every N-th message)
+    canbus_every_n: 1
+    oak_every_n: 2
+    gps_every_n: 1
+    filter_every_n: 1
+
+    # TF frames
+    odom_frame: "odom"
+    base_frame: "base_link"
+    gps_frame: "gps_link"
+    camera_frame: "oak_link"

@@ -1,0 +1,53 @@
+graph TB
+    subgraph PARAMS[Parameters]
+        HOST["host: localhost"]
+        PORTS["canbus: 6001 | oak: 6002 | gps: 6003 | filter: 6004"]
+        FRAMES["odom_frame | base_frame | gps_frame | camera_frame"]
+    end
+
+    subgraph CANBUS["Canbus Stream - port 6001"]
+        CS_IN["Subscribe /state canbus"] --> CS_TPDO["payload.amiga_tpdo1"]
+        CS_IN --> CS_BAT["payload.battery_charge_level"]
+    end
+
+    subgraph FILTER["Filter Stream - port 6004"]
+        FS_IN["Subscribe /state filter"] --> FS_POSE["pose.a_from_b translation + quaternion"]
+        FS_IN --> FS_VEL["pose.tangent_of_b_in_a velocity"]
+    end
+
+    subgraph GPSSTREAM["GPS Stream - port 6003"]
+        GS_IN["Subscribe /state gps"] --> GS_FIX["latitude, longitude, altitude"]
+        GS_IN --> GS_ACC["horizontal + vertical accuracy"]
+    end
+
+    subgraph OAKSTREAM["OAK Stream - port 6002"]
+        OS_IN["Subscribe /state oak0"] --> OS_LEFT["left.image_data"]
+        OS_IN --> OS_RGB["rgb.image_data"]
+        OS_IN --> OS_IMU["imu_packets"]
+    end
+
+    subgraph COMMAND["Command Input"]
+        CMD["Twist: /cmd_vel"] --> SEND["_send_twist gRPC to canbus"]
+        CMD2["TwistStamped: /amiga/cmd_vel"] --> SEND
+    end
+
+    CS_TPDO --> T_TWIST["TwistStamped: /amiga/twist"]
+    CS_TPDO --> T_CTRL["UInt32: /amiga/control_state"]
+    CS_BAT --> T_BAT["Float32: /amiga/battery"]
+
+    FS_POSE --> T_ODOM["Odometry: /amiga/odom"]
+    FS_VEL --> T_ODOM
+    FS_POSE --> T_TF["TF: odom to base_link"]
+
+    GS_FIX --> T_GPS["NavSatFix: /amiga/gps"]
+    GS_ACC --> T_GPS
+
+    OS_LEFT --> T_LEFT["CompressedImage: /amiga/oak/left/compressed"]
+    OS_RGB --> T_RGB["CompressedImage: /amiga/oak/rgb/compressed"]
+    OS_IMU --> T_IMU["Imu: /amiga/imu"]
+
+    subgraph MISSING["Not Currently Implemented"]
+        M1["No covariance on odom"]
+        M2["No static TF base_link to gps_link"]
+        M3["No static TF base_link to oak_link"]
+    end
