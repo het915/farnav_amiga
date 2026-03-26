@@ -1,8 +1,17 @@
+# Build artifacts
 build/
 install/
 log/
+
+# Python
 __pycache__/
 *.pyc
-.vscode/
 *.egg-info/
-make_pdf.py
+.pytest_cache/
+
+# IDE
+.vscode/
+.idea/
+
+# Claude
+.claude/
