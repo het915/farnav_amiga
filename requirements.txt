@@ -1,0 +1,18 @@
+# Farm-ng Amiga SDKs (gRPC bridge)
+farm-ng-amiga
+farm-ng-core
+
+# Navigation / MPC dependencies
+casadi
+scipy
+pyproj
+numpy
+
+# Vision
+opencv-python-headless
+
+# Visualization (optional, for live_path_viz)
+matplotlib
+
+# Testing
+pytest

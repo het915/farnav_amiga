@@ -1,0 +1,306 @@
+========================================================================
+  FarNav Amiga — Setup & Usage Guide
+  Autonomous Crop-Row Navigation for Farm-ng Amiga
+========================================================================
+
+ROBOT INFO
+  Hostname : lavender-latency
+  IP       : 172.16.107.128
+
+
+========================================================================
+STEP 1: PREREQUISITES
+========================================================================
+
+  Operating System : Ubuntu 22.04 (Jammy)
+  Python           : 3.10
+  ROS 2            : Humble Hawksbill
+  Network          : Must be on same network as the Amiga robot
+
+  1.1  Install ROS 2 Humble (if not already installed):
+
+       sudo apt update && sudo apt install -y software-properties-common curl
+       sudo curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+         -o /usr/share/keyrings/ros-archive-keyring.gpg
+       echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] \
+         http://packages.ros.org/ros2/ubuntu jammy main" | \
+         sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+       sudo apt update
+       sudo apt install -y ros-humble-desktop
+
+  1.2  Install dev tools:
+
+       sudo apt install -y python3-colcon-common-extensions python3-rosdep python3-pip
+
+  1.3  Add to ~/.bashrc:
+
+       source /opt/ros/humble/setup.bash
+
+
+========================================================================
+STEP 2: INSTALL DEPENDENCIES
+========================================================================
+
+  2.1  Farm-ng SDK (gRPC communication with the robot):
+
+       pip install farm-ng-amiga farm-ng-core
+
+  2.2  Navigation dependencies:
+
+       pip install pyproj scipy casadi numpy
+
+  2.3  Teleop keyboard:
+
+       sudo apt install -y ros-humble-teleop-twist-keyboard
+
+  2.4  (Optional) CycloneDDS — recommended for reliable discovery:
+
+       sudo apt install -y ros-humble-rmw-cyclonedds-cpp
+
+       Add to ~/.bashrc:
+       export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+
+
+========================================================================
+STEP 3: CLONE AND BUILD THE REPOSITORY
+========================================================================
+
+  3.1  Clone the repo:
+
+       cd ~/lab
+       git clone https://github.com/het915/farnav_amiga.git amiga_project
+       cd amiga_project
+
+  3.2  Install ROS dependencies:
+
+       sudo rosdep init 2>/dev/null; rosdep update
+       rosdep install --from-paths src --ignore-src -r -y
+
+  3.3  Build all packages:
+
+       colcon build
+
+  3.4  Source the workspace:
+
+       source install/setup.bash
+
+  3.5  (Optional) Add to ~/.bashrc for convenience:
+
+       source ~/lab/amiga_project/install/setup.bash
+
+
+========================================================================
+STEP 4: CONFIGURE
+========================================================================
+
+  4.1  Set the robot IP in the bridge config:
+
+       Edit: src/amiga_ros2_bridge/config/amiga_bridge.yaml
+       Change "host" to "172.16.107.128" (or your robot's IP)
+
+  4.2  Set GPS waypoints for your field:
+
+       Edit: src/farnav/config/row_data.yaml
+       Update the A (start) and B (end) GPS coordinates for each row
+       Set utm_epsg to your UTM zone (e.g., "EPSG:32616")
+
+  4.3  Rebuild after config changes:
+
+       colcon build
+       source install/setup.bash
+
+
+========================================================================
+STEP 5: VERIFY ROBOT CONNECTION
+========================================================================
+
+  5.1  Check network connectivity:
+
+       ping 172.16.107.128
+
+  5.2  Check gRPC ports are open:
+
+       nc -zv 172.16.107.128 6001
+       nc -zv 172.16.107.128 50010
+       nc -zv 172.16.107.128 20001
+
+
+========================================================================
+STEP 6: RUN THE SYSTEM
+========================================================================
+
+  Open 4 terminals. In EACH terminal, first run:
+
+       source ~/lab/amiga_project/install/setup.bash
+
+  --- TERMINAL 1: Bridge (connects to robot) ---
+
+       ros2 launch amiga_ros2_bridge amiga_bridge.launch.py host:=172.16.107.128
+
+       Wait for "Bridge started" messages.
+       Verify with: ros2 topic list
+       You should see /amiga/odom, /amiga/gps, /amiga/twist, etc.
+
+  --- TERMINAL 2: Global Planner (generates path) ---
+
+       ros2 run farnav global_planner \
+         --ros-args --params-file src/farnav/config/row_data.yaml
+
+       Wait for "GPS/Odom alignment complete" message.
+       Verify with: ros2 topic echo /farnav/global_path --once
+
+  --- TERMINAL 3: MPC Controller (follows path) ---
+
+       ros2 launch farnav controller_mpc.launch.py
+
+       Controller starts in DISABLED state (waits for enable signal).
+
+  --- TERMINAL 4: Enable and Monitor ---
+
+       # Enable the controller:
+       ros2 topic pub /farnav/controller_enable std_msgs/msg/Bool \
+         "{data: true}" --once
+
+       # Monitor control state:
+       ros2 topic echo /amiga/control_state
+
+       # Monitor odometry:
+       ros2 topic echo /amiga/odom
+
+
+========================================================================
+STEP 7: ACTIVATE THE ROBOT
+========================================================================
+
+  7.1  Set the pendant to AUTO mode.
+       The control state should show 4 (AUTO_READY).
+
+  7.2  Once the controller sends its first command, the robot
+       transitions to 5 (AUTO_ACTIVE) and begins moving.
+
+  7.3  The robot will:
+       - Follow the planned spline path
+       - Decelerate near the end of the row
+       - Stop automatically at the B endpoint
+
+  7.4  EMERGENCY STOP: Press the E-STOP on the pendant at any time.
+
+
+========================================================================
+STEP 8: TELEOPERATION (MANUAL DRIVING)
+========================================================================
+
+  To drive the robot manually instead of using the MPC:
+
+  8.1  Make sure the controller is disabled (skip Terminal 3 above).
+
+  8.2  Run teleop keyboard in a focused terminal:
+
+       ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+  8.3  Key controls:
+         i = forward      , = backward
+         j = turn left     l = turn right
+         k = stop
+         q/z = increase/decrease all speeds
+
+  8.4  Set pendant to AUTO. Press 'i' to start moving.
+
+
+========================================================================
+STEP 9: VISUALIZATION (RVIZ)
+========================================================================
+
+  Launch RViz with the pre-configured display:
+
+       rviz2 -d ~/lab/amiga_project/src/amiga_ros2_bridge/config/amiga_bridge.rviz
+
+  Shows: TF tree, odometry trail, camera feeds, path, predicted trajectory.
+
+
+========================================================================
+STEP 10: SWITCH CROP ROWS
+========================================================================
+
+  To cycle to the next row:
+
+       ros2 service call /farnav/set_active_row std_srvs/srv/Trigger
+
+  The planner will recompute the path for the next row in the config.
+
+
+========================================================================
+STEP 11: RUN TESTS
+========================================================================
+
+  Unit and integration tests:
+
+       cd ~/lab/amiga_project/src/farnav
+       python -m pytest test/ -v
+
+
+========================================================================
+TROUBLESHOOTING
+========================================================================
+
+  PROBLEM: ros2 topic list hangs or shows stale data
+  FIX:     pkill -9 ros2_daemon
+           ros2 topic list --no-daemon
+
+  PROBLEM: DDS discovery errors
+  FIX:     export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+           Make sure ALL terminals use the same DDS.
+
+  PROBLEM: Cannot reach robot
+  FIX:     Check you are on the same network.
+           ping 172.16.107.128
+           nc -zv 172.16.107.128 6001
+
+  PROBLEM: Teleop not working
+  FIX:     1. Check bridge is running: ros2 topic info /cmd_vel -v
+           2. Make sure teleop terminal has focus
+           3. Check control state: ros2 topic echo /amiga/control_state --once
+           4. Pendant must be in AUTO mode
+
+  PROBLEM: Robot does not move in AUTO
+  FIX:     Control state must be 4 (AUTO_READY).
+           First /twist command transitions to 5 (AUTO_ACTIVE).
+           If state is not 4, toggle the pendant.
+
+  PROBLEM: Build fails
+  FIX:     rosdep install --from-paths src --ignore-src -r -y
+           colcon build
+
+
+========================================================================
+QUICK REFERENCE — USEFUL COMMANDS
+========================================================================
+
+  # List all active topics
+  ros2 topic list
+
+  # Check a single message
+  ros2 topic echo /amiga/odom --once
+
+  # Monitor publish rate
+  ros2 topic hz /amiga/odom
+
+  # View TF tree
+  ros2 run tf2_tools view_frames
+
+  # Manual velocity command (forward 0.2 m/s)
+  ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+    "{linear: {x: 0.2}, angular: {z: 0.0}}" --once
+
+  # Stop robot
+  ros2 topic pub /cmd_vel geometry_msgs/msg/Twist \
+    "{linear: {x: 0.0}, angular: {z: 0.0}}" --once
+
+  # Rebuild single package
+  colcon build --packages-select farnav
+  source install/setup.bash
+
+
+========================================================================
+  End of Guide
+========================================================================

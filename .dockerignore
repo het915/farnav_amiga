@@ -1,0 +1,11 @@
+build/
+install/
+log/
+.git/
+__pycache__/
+*.pyc
+*.egg-info/
+docs/
+presentations/
+27marchppt/
+planner_*.png

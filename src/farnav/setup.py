@@ -26,6 +26,9 @@ setup(
             'global_planner = farnav.global_planner:main',
             'controller_mpc = farnav.controller_mpc:main',
             'path_overlay = farnav.path_overlay_node:main',
+            'live_path_viz = farnav.live_path_viz:main',
+            'gps_odom = farnav.gps_odom_node:main',
+            'data_logger = farnav.data_logger:main',
         ],
     },
 )

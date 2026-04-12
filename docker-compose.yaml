@@ -1,0 +1,59 @@
+services:
+  # ── Development shell ──────────────────────────────────────
+  # Interactive container with source mounted for live editing
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: amiga-farnav:humble
+    container_name: amiga-dev
+    stdin_open: true
+    tty: true
+    network_mode: host            # share host network (reach robot at 172.16.107.128)
+    privileged: true              # needed for some ROS 2 DDS transports
+    environment:
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - DISPLAY=${DISPLAY}
+    volumes:
+      - ./src:/ros2_ws/src        # live-edit source on host
+      - /tmp/.X11-unix:/tmp/.X11-unix  # GUI forwarding (rviz2)
+    command: bash
+
+  # ── Run tests ──────────────────────────────────────────────
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: amiga-farnav:humble
+    container_name: amiga-test
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=0
+    command: >
+      bash -c "
+        source /opt/ros/humble/setup.bash &&
+        cd /ros2_ws &&
+        colcon build --symlink-install &&
+        colcon test --event-handlers console_direct+ &&
+        colcon test-result --verbose
+      "
+
+  # ── Launch the full stack (bridge + planner + MPC) ─────────
+  launch:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: amiga-farnav:humble
+    container_name: amiga-launch
+    network_mode: host
+    environment:
+      - ROS_DOMAIN_ID=0
+      - RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
+      - AMIGA_HOST=172.16.107.128
+    command: >
+      bash -c "
+        source /opt/ros/humble/setup.bash &&
+        source /ros2_ws/install/setup.bash &&
+        ros2 launch farnav controller_mpc.launch.py
+      "

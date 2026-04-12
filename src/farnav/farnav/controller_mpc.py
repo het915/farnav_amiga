@@ -229,13 +229,15 @@ def solve_mpc(solver, nlp_dims, params, x0, theta_current, prev_u,
 
     n_state_vars = n_x * (N + 1)
 
-    # Control bounds
+    # Control bounds — enforce minimum forward velocity to prevent
+    # skid-steer spin-in-place (robot shakes violently at v≈0 + high omega)
+    v_min = 0.1  # minimum forward speed (m/s)
     for k in range(N):
         u_offset = n_state_vars + k * n_u
-        lbx[u_offset] = -v_wheel_max   # v_cmd lower
-        ubx[u_offset] = v_wheel_max     # v_cmd upper
-        lbx[u_offset + 1] = -omega_max  # omega lower
-        ubx[u_offset + 1] = omega_max   # omega upper
+        lbx[u_offset] = v_min            # v_cmd lower (no reverse, no near-zero)
+        ubx[u_offset] = v_wheel_max      # v_cmd upper
+        lbx[u_offset + 1] = -omega_max   # omega lower
+        ubx[u_offset + 1] = omega_max    # omega upper
 
     # ── Initial guess ──
     x0_guess = np.zeros(n_vars)
@@ -319,6 +321,8 @@ class ControllerMPC(Node):
         self.theta_current = 0.0
         self.prev_u = np.array([0.0, 0.0])
         self.warm_start = None
+        self._enable_time = None      # timestamp when controller was enabled
+        self._ramp_duration = 3.0     # seconds to ramp from v_min to v_ref
 
         # ── Subscribers ──
         self.create_subscription(
@@ -402,6 +406,10 @@ class ControllerMPC(Node):
         if not self.enabled:
             self._publish_zero_cmd()
             self.warm_start = None
+        if self.enabled:
+            self._enable_time = self.get_clock().now()
+        else:
+            self._enable_time = None
         self.get_logger().info(f'Controller {"ENABLED" if self.enabled else "DISABLED"}')
 
     # ── Control loop ─────────────────────────────────────────────────────
@@ -433,16 +441,30 @@ class ControllerMPC(Node):
             (x0[0] - self.path_x[-1])**2 + (x0[1] - self.path_y[-1])**2
         )
 
+        # Get reference state at current theta for logging
+        ref_x, ref_y, ref_psi, _ = get_path_state(
+            self.theta_current, self.path_x, self.path_y, self.arc_lengths
+        )
+
         # Log every 20th cycle (~1 Hz at 20 Hz control rate)
         self._loop_count = getattr(self, '_loop_count', 0) + 1
         if self._loop_count % 20 == 0:
             self.get_logger().info(
-                f'[MPC] pos=({x0[0]:.2f},{x0[1]:.2f}) yaw={np.degrees(x0[2]):.1f}deg v={x0[3]:.2f}m/s | '
-                f'theta={self.theta_current:.2f}/{total_length:.2f}m rem={remaining:.2f}m | '
-                f'e_c={e_c:.3f}m e_psi={np.degrees(e_psi):.1f}deg | '
-                f'dist_to_B={dist_to_end:.2f}m | '
-                f'path_start=({self.path_x[0]:.2f},{self.path_y[0]:.2f}) '
-                f'path_end=({self.path_x[-1]:.2f},{self.path_y[-1]:.2f})'
+                f'[STATE] robot=({x0[0]:.2f},{x0[1]:.2f}) yaw={np.degrees(x0[2]):.1f}deg v={x0[3]:.2f}m/s'
+            )
+            self.get_logger().info(
+                f'[REF]   ref=({ref_x:.2f},{ref_y:.2f}) ref_yaw={np.degrees(ref_psi):.1f}deg | '
+                f'theta={self.theta_current:.2f}/{total_length:.2f}m'
+            )
+            self.get_logger().info(
+                f'[ERROR] e_c={e_c:.3f}m e_psi={np.degrees(e_psi):.1f}deg | '
+                f'dist_to_ref={np.sqrt((x0[0]-ref_x)**2+(x0[1]-ref_y)**2):.2f}m | '
+                f'dist_to_B={dist_to_end:.2f}m rem={remaining:.2f}m'
+            )
+            self.get_logger().info(
+                f'[PATH]  start=({self.path_x[0]:.2f},{self.path_y[0]:.2f}) '
+                f'end=({self.path_x[-1]:.2f},{self.path_y[-1]:.2f}) | '
+                f'path_dir={np.degrees(np.arctan2(self.path_y[-1]-self.path_y[0], self.path_x[-1]-self.path_x[0])):.1f}deg'
             )
 
         # Check if reached end of path — use both arc-length AND distance to end
@@ -454,14 +476,20 @@ class ControllerMPC(Node):
             self.enabled = False
             return
 
+        # Velocity ramp-up: start slow so heading corrects gently (no skid-steer shaking)
+        effective_params = dict(self.params)
+        if self._enable_time is not None:
+            elapsed = (self.get_clock().now() - self._enable_time).nanoseconds / 1e9
+            if elapsed < self._ramp_duration:
+                v_min = 0.1
+                ramp_frac = elapsed / self._ramp_duration
+                effective_params['v_ref'] = v_min + (self.params['v_ref'] - v_min) * ramp_frac
+
         # Ramp down speed near end of path for smooth deceleration
         decel_zone = 3.0
         if remaining < decel_zone:
             scale = max(remaining / decel_zone, 0.1)
-            effective_params = dict(self.params)
-            effective_params['v_ref'] = self.params['v_ref'] * scale
-        else:
-            effective_params = self.params
+            effective_params['v_ref'] = effective_params['v_ref'] * scale
 
         # Solve MPC
         try:
@@ -498,9 +526,19 @@ class ControllerMPC(Node):
 
         # Log MPC output every 20th cycle
         if self._loop_count % 20 == 0:
+            pred_end = predicted_states[-1]
+            pred_dir = np.degrees(np.arctan2(
+                predicted_states[-1, 1] - predicted_states[0, 1],
+                predicted_states[-1, 0] - predicted_states[0, 0]
+            ))
             self.get_logger().info(
                 f'[MPC CMD] v_cmd={v_cmd:.3f}m/s omega={omega_cmd:.4f}rad/s | '
                 f'v_ref_eff={effective_params["v_ref"]:.3f}'
+            )
+            self.get_logger().info(
+                f'[PRED]  pred_end=({pred_end[0]:.2f},{pred_end[1]:.2f}) '
+                f'pred_yaw={np.degrees(pred_end[2]):.1f}deg pred_v={pred_end[3]:.2f}m/s | '
+                f'pred_dir={pred_dir:.1f}deg'
             )
 
         # Publish command

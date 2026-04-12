@@ -66,12 +66,11 @@ class GlobalPlanner(Node):
         )
 
         # --- Alignment state ---
-        # We need one GPS fix + one odom reading to compute the UTM->odom transform
+        # Two GPS+odom pairs (separated by movement) to compute rotation
         self.aligned = False
-        self.odom_at_align = None   # (x, y, yaw) in odom frame
-        self.gps_at_align = None    # (utm_e, utm_n) at alignment time
-        self.utm_to_odom_offset = None  # (dx, dy)
-        self.utm_to_odom_angle = None   # rotation angle
+        self._align_samples = []        # list of (gps_utm_array, odom_xy_array)
+        self._align_min_dist = 0.5      # min GPS distance (m) between samples
+        self.utm_to_odom_angle = None   # rotation angle (computed from alignment)
 
         self.spline_path = None
         self.arc_lengths = None
@@ -108,62 +107,63 @@ class GlobalPlanner(Node):
     def _gps_cb(self, msg: NavSatFix):
         if msg.status.status < 0:
             return  # no fix
-        n, e = self.transformer.transform(msg.latitude, msg.longitude)
-        self._latest_gps = (e, n)
+        # pyproj returns (easting, northing) for EPSG:4326 -> UTM
+        easting, northing = self.transformer.transform(msg.latitude, msg.longitude)
+        self._latest_gps = (easting, northing)
         self._try_align()
 
     def _try_align(self):
-        """Once we have both GPS and odom, compute the transform and build the path."""
+        """Compute UTM->odom transform using two GPS+odom pairs.
+
+        Collects two samples separated by at least _align_min_dist meters
+        of GPS movement, then computes the rotation angle between the UTM
+        and odom frames from the direction of travel in each frame.
+        """
         if self.aligned or self._latest_odom is None or self._latest_gps is None:
             return
 
         odom_x, odom_y, odom_yaw = self._latest_odom
         gps_e, gps_n = self._latest_gps
 
-        self.odom_at_align = self._latest_odom
-        self.gps_at_align = self._latest_gps
+        curr_gps = np.array([gps_e, gps_n])
+        curr_odom = np.array([odom_x, odom_y])
 
-        # The robot's GPS position in UTM is (gps_e, gps_n)
-        # The robot's odom position is (odom_x, odom_y) with heading odom_yaw
-        # We need to transform UTM points so that (gps_e, gps_n) maps to (odom_x, odom_y)
-        # and the UTM north direction is rotated to match odom heading
+        # First sample — just store it
+        if len(self._align_samples) == 0:
+            self._align_samples.append((curr_gps.copy(), curr_odom.copy()))
+            self.get_logger().info(
+                f'Alignment sample 1: odom=({odom_x:.2f}, {odom_y:.2f}), '
+                f'utm=({gps_e:.2f}, {gps_n:.2f}). '
+                f'Drive >{self._align_min_dist:.0f}m to complete alignment...'
+            )
+            return
 
-        # UTM heading of the path (north = +Y in UTM, east = +X)
-        # In UTM, heading 0 = east. Robot odom_yaw is also from +X axis.
-        # The GPS doesn't give heading, so we use the path direction at Point A
-        # to determine the rotation.
+        # Check if robot has moved enough from the first sample
+        first_gps, first_odom = self._align_samples[0]
+        gps_dist = np.linalg.norm(curr_gps - first_gps)
 
-        # For now: compute the UTM position of Point A
-        row = self.rows[self.active_row_idx]
-        lat_a, lon_a = row['A']
-        n_a, e_a = self.transformer.transform(lat_a, lon_a)
+        if gps_dist < self._align_min_dist:
+            return  # not enough movement yet
 
-        # Path heading at Point A (from A toward next waypoint or B)
-        if row['waypoints']:
-            lat_next, lon_next = row['waypoints'][0]
-        else:
-            lat_next, lon_next = row['B']
-        n_next, e_next = self.transformer.transform(lat_next, lon_next)
-        path_heading_utm = np.arctan2(n_next - n_a, e_next - e_a)
+        # Compute heading in UTM frame and odom frame
+        d_utm = curr_gps - first_gps        # (delta_easting, delta_northing)
+        d_odom = curr_odom - first_odom      # (delta_x, delta_y)
 
-        # The rotation needed: from UTM heading to odom heading
-        # At Point A, the path heading in UTM is path_heading_utm
-        # The robot is currently near Point A, heading odom_yaw
-        # So rotation = odom_yaw - path_heading_utm
-        self.utm_to_odom_angle = odom_yaw - path_heading_utm
+        utm_heading = np.arctan2(d_utm[1], d_utm[0])
+        odom_heading = np.arctan2(d_odom[1], d_odom[0])
 
-        self.get_logger().info(
-            f'Alignment: odom_yaw={np.degrees(odom_yaw):.1f} deg, '
-            f'path_heading_utm={np.degrees(path_heading_utm):.1f} deg, '
-            f'rotation={np.degrees(self.utm_to_odom_angle):.1f} deg'
-        )
+        self.utm_to_odom_angle = odom_heading - utm_heading
 
-        # Store UTM origin (Point A) and odom position for transform
-        self._utm_origin = np.array([e_a, n_a])
-        self._odom_origin = np.array([odom_x, odom_y])
+        # Use the latest sample as anchor
+        self._utm_origin = curr_gps.copy()
+        self._odom_origin = curr_odom.copy()
 
         self.aligned = True
-        self.get_logger().info('GPS/odom alignment complete, building path...')
+        self.get_logger().info(
+            f'Alignment complete: rotation={np.degrees(self.utm_to_odom_angle):.1f}°, '
+            f'baseline={gps_dist:.2f}m, '
+            f'anchor: odom=({odom_x:.2f}, {odom_y:.2f}), utm=({gps_e:.2f}, {gps_n:.2f})'
+        )
 
         self._build_path()
 
@@ -175,9 +175,9 @@ class GlobalPlanner(Node):
     def _utm_to_odom(self, utm_points):
         """
         Transform UTM points to odom frame.
-        1. Subtract UTM origin (Point A)
-        2. Rotate by utm_to_odom_angle
-        3. Add odom origin (robot position at alignment)
+        1. Subtract UTM anchor (robot GPS at alignment)
+        2. Rotate by utm_to_odom_angle (computed from two-point alignment)
+        3. Add odom anchor (robot odom at alignment)
         """
         shifted = utm_points - self._utm_origin
         cos_a = np.cos(self.utm_to_odom_angle)
@@ -231,7 +231,8 @@ class GlobalPlanner(Node):
     # ------------------------------------------------------------------
     def _latlon_to_utm(self, lat, lon):
         """Convert lat/lon (WGS84) to UTM easting/northing."""
-        northing, easting = self.transformer.transform(lat, lon)
+        # pyproj returns (easting, northing) for EPSG:4326 -> UTM
+        easting, northing = self.transformer.transform(lat, lon)
         return easting, northing
 
     # ------------------------------------------------------------------
@@ -264,6 +265,24 @@ class GlobalPlanner(Node):
         self.get_logger().info(
             f'Row "{row["name"]}": {len(odom_points)} control points -> spline with {self.spline_resolution} samples'
         )
+
+        # Log UTM direction from A to B for sanity checking
+        dx_utm = utm_points[-1, 0] - utm_points[0, 0]
+        dy_utm = utm_points[-1, 1] - utm_points[0, 1]
+        bearing_deg = np.degrees(np.arctan2(dx_utm, dy_utm))  # from north
+        dist_utm = np.sqrt(dx_utm**2 + dy_utm**2)
+        self.get_logger().info(
+            f'UTM A->B: dE={dx_utm:.2f}m dN={dy_utm:.2f}m dist={dist_utm:.1f}m bearing={bearing_deg:.1f}deg'
+        )
+
+        # Log odom direction
+        dx_odom = odom_points[-1, 0] - odom_points[0, 0]
+        dy_odom = odom_points[-1, 1] - odom_points[0, 1]
+        odom_bearing = np.degrees(np.arctan2(dy_odom, dx_odom))
+        self.get_logger().info(
+            f'Odom A->B: dx={dx_odom:.2f}m dy={dy_odom:.2f}m bearing={odom_bearing:.1f}deg (from x-axis)'
+        )
+
         self.get_logger().info(
             f'Path start (odom): ({odom_points[0, 0]:.2f}, {odom_points[0, 1]:.2f}), '
             f'end: ({odom_points[-1, 0]:.2f}, {odom_points[-1, 1]:.2f})'
