@@ -65,6 +65,7 @@ cd ~/lab/amiga_project
 rosdep install --from-paths src --ignore-src -r -y
 colcon build
 source install/setup.bash
+pip install -r requirement.txt
 ```
 
 ### Run
